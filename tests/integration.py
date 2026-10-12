@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from dataclasses import asdict
 import json
@@ -12,7 +13,7 @@ import subprocess
 import tempfile
 
 from bitcoin_ipc_client import BitcoinIPCClient, IPCError, ConnectionLost, RPCError
-from bitcoin_ipc_client.schemas import provenance
+from bitcoin_ipc_client.schemas import DEFAULT_CORE, provenance, require_capnp
 from reference_indexer.blocks import decode_block
 from reference_indexer.store import IndexStore
 from reference_indexer.sync import reconcile
@@ -34,19 +35,21 @@ async def integration_test(args):
         store = IndexStore(root / "index.sqlite")
         stage = "node startup"
         mock_time = 1700000000
+        crash_recovery = None
 
         def begin_stage(name):
             nonlocal stage
             stage = name
             LOG.info("Integration: %s", stage)
 
-        async def generate(count):
+        async def generate(count, control=None):
             nonlocal mock_time
+            control = control or client
             # Reusing a parent, payout, and timestamp after invalidateblock can
             # reproduce the invalidated block. Make each new branch distinct.
             mock_time += 60
-            await client.rpc("setmocktime", [mock_time])
-            hashes = await client.rpc("generatetoaddress", [count, "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"])
+            await control.rpc("setmocktime", [mock_time])
+            hashes = await control.rpc("generatetoaddress", [count, "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"])
             assert len(hashes) == count, f"Requested {count} blocks, generated {len(hashes)}"
             return hashes
 
@@ -83,6 +86,10 @@ async def integration_test(args):
                     if event.kind == "connected":
                         return event
             return await asyncio.wait_for(get(), 10)
+
+        async def flush_callbacks():
+            chain = await client.chain_capability()
+            await client.call(lambda: chain.waitForNotifications(context=client.ctx))
 
         try:
             begin_stage("node startup")
@@ -122,6 +129,8 @@ async def integration_test(args):
             # Reconnect and local restart recover from the same database.
             begin_stage("client reconnect and database reopen")
             await client.close()
+            async with BitcoinIPCClient(ipc_socket, args.core_source, timeout=10) as controller:
+                await generate(2, controller)
             store.close()
             store = IndexStore(root / "index.sqlite")
             await client.connect()
@@ -139,7 +148,27 @@ async def integration_test(args):
             await next_connected()
             await reconcile(client, store)
             assert store.tip() == await client.tip()
+            begin_stage("abrupt node crash and recovery")
+            crash_recovery = {"before_crash": asdict(await client.tip())}
+            process.kill()
+            await asyncio.to_thread(process.wait, timeout=15)
+            await client.close()
+            store.close()
+            store = IndexStore(root / "index.sqlite")
+            process = start_node()
+            await ready()
+            crash_recovery["after_restart"] = asdict(await client.tip())
+            await client.subscribe()
+            await reconcile(client, store)
+            assert store.tip() == await client.tip()
+            await generate(1)
+            await flush_callbacks()
+            await reconcile(client, store)
+            assert store.tip() == await client.tip()
+            assert store.db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            crash_recovery["after_recovery"] = asdict(store.tip())
             print(json.dumps({"integration_test": "passed", "tip": asdict(store.tip()),
+                        "crash_recovery": crash_recovery,
                         "provenance": provenance(args.core_source)}, sort_keys=True), flush=True)
         except Exception as exc:
             logfile.flush()
@@ -163,3 +192,23 @@ async def integration_test(args):
                     process.kill()
                     await asyncio.to_thread(process.wait)
             logfile.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--core-source", type=Path, default=DEFAULT_CORE)
+    parser.add_argument("--node-binary", type=Path, default=DEFAULT_CORE / "build/bin/bitcoin-node")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    try:
+        asyncio.run(require_capnp().run(integration_test(args)))
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    except (IPCError, OSError, ValueError) as exc:
+        LOG.error("%s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

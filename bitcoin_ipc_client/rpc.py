@@ -11,10 +11,9 @@ if TYPE_CHECKING:
     from .client import BitcoinIPCClient
 
 async def execute_rpc(client: BitcoinIPCClient, method: str, params: list | dict | None = None) -> Any:
-    if client.rpc_cap is None:
-        client.rpc_cap = (await client.call(lambda: client.init.makeRpc(context=client.ctx))).result
+    capability = await client._capability("rpc_cap", "makeRpc")
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params if params is not None else []}
-    response = await client.call(lambda: client.rpc_cap.executeRpc(
+    response = await client.call(lambda: capability.executeRpc(
         context=client.ctx, request=json.dumps(request), uri="", user="",
     ))
     payload = json.loads(str(response.result))

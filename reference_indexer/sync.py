@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from bitcoin_ipc_client import BitcoinIPCClient, BlockRef, IPCError, UnsupportedInterface
+from bitcoin_ipc_client import BitcoinIPCClient, BlockRef, IPCError, RPCError, UnsupportedInterface
 from .blocks import decode_block
 from .store import IndexStore
 
@@ -32,7 +32,14 @@ async def reconcile(client: BitcoinIPCClient, store: IndexStore, *, mode: str = 
             # matches before and after the height lookup; restart on change.
             if await client.tip() != snapshot:
                 raise SnapshotChanged()
-            value = await client.rpc("getblockhash", [height])
+            try:
+                value = await client.rpc("getblockhash", [height])
+            except RPCError:
+                # A reorg can shorten the chain between the pre-query check
+                # and getblockhash, making a formerly valid height disappear.
+                if await client.tip() != snapshot:
+                    raise SnapshotChanged()
+                raise
             if await client.tip() != snapshot:
                 raise SnapshotChanged()
             return value

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import base64
 import json
 import math
+import logging
 from pathlib import Path
 import statistics
 import time
@@ -13,7 +15,7 @@ from typing import Any
 import urllib.request
 
 from bitcoin_ipc_client import BitcoinIPCClient, IPCError, RPCError
-from bitcoin_ipc_client.schemas import provenance
+from bitcoin_ipc_client.schemas import DEFAULT_CORE, provenance, require_capnp
 from reference_indexer.blocks import decode_block
 
 def http_rpc(url: str, cookie: Path, method: str, params: list) -> Any:
@@ -68,3 +70,35 @@ async def benchmark(client: BitcoinIPCClient, args):
     result["decode_median_ms"] = statistics.median(samples) * 1000
     result["decode_process_cpu_note"] = "Wall time only; does not estimate serialization CPU or socket bytes."
     return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--core-source", type=Path, default=DEFAULT_CORE)
+    parser.add_argument("--socket", type=Path, default=Path(".local/node.sock"))
+    parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--hash")
+    parser.add_argument("--iterations", type=int, default=100)
+    parser.add_argument("--http-url")
+    parser.add_argument("--cookie", type=Path)
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    async def run():
+        async with BitcoinIPCClient(args.socket, args.core_source, timeout=args.timeout) as client:
+            print(json.dumps(await benchmark(client, args), sort_keys=True), flush=True)
+
+    try:
+        if args.iterations <= 0:
+            raise ValueError("iterations must be positive")
+        asyncio.run(require_capnp().run(run()))
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    except (IPCError, OSError, ValueError) as exc:
+        logging.error("%s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

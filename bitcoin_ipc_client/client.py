@@ -36,6 +36,8 @@ class BitcoinIPCClient:
         self.callback_servers = None
         self.disconnect_task = None
         self._lock = asyncio.Lock()
+        self._capability_lock = asyncio.Lock()
+        self._subscription_lock = asyncio.Lock()
         self._closing = False
         self.generation = 0
 
@@ -98,13 +100,27 @@ class BitcoinIPCClient:
                 self.interrupt_events("IPC connection lost")
 
     async def call(self, request):
+        generation = self.generation
+        started = False
         try:
-            async with self._lock:
-                if not self.connected:
-                    raise ConnectionLost("IPC is disconnected; reconnect and reconcile")
-                # Build/send the request only after acquiring the context lock.
-                return await asyncio.wait_for(request(), self.timeout)
+            # Include waiting for the shared execution context in the deadline.
+            async with asyncio.timeout(self.timeout):
+                async with self._lock:
+                    if not self.connected:
+                        raise ConnectionLost("IPC is disconnected; reconnect and reconcile")
+                    if generation != self.generation:
+                        raise ConnectionLost("Connection changed while queued; request was not sent")
+                    # Build/send only after acquiring the context lock.
+                    started = True
+                    response = await request()
+                    if generation != self.generation:
+                        raise ConnectionLost("Connection changed while awaiting a response")
+                    return response
         except asyncio.TimeoutError as exc:
+            if not started:
+                raise IPCError("IPC call timed out waiting for execution context; request was not sent") from exc
+            if generation != self.generation:
+                raise ConnectionLost("A call on the previous connection timed out; outcome may be unknown") from exc
             # A timed-out mutation may already have executed; no automatic replay.
             self.connected = False
             if self.transport is not None:
@@ -116,22 +132,33 @@ class BitcoinIPCClient:
                 raise
             kind = str(getattr(exc, "type", ""))
             if "DISCONNECTED" in kind:
-                self.connected = False
-                self.interrupt_events("IPC connection lost")
+                if generation == self.generation:
+                    self.connected = False
+                    self.interrupt_events("IPC connection lost")
                 raise ConnectionLost(str(exc)) from exc
             if "UNIMPLEMENTED" in kind:
                 raise UnsupportedInterface(str(exc)) from exc
             raise IPCError(f"IPC call failed: {exc}") from exc
 
+    async def _capability(self, attribute: str, factory: str):
+        # Creating capabilities outside this lock allows simultaneous first
+        # calls to create duplicate remote objects and overwrite cached handles.
+        async with self._capability_lock:
+            if not self.connected:
+                raise ConnectionLost("IPC is disconnected; reconnect and reconcile")
+            capability = getattr(self, attribute)
+            if capability is None:
+                response = await self.call(lambda: getattr(self.init, factory)(context=self.ctx))
+                capability = response.result
+                setattr(self, attribute, capability)
+            return capability
+
     async def chain_capability(self):
-        if self.chain is None:
-            self.chain = (await self.call(lambda: self.init.makeChain(context=self.ctx))).result
-        return self.chain
+        return await self._capability("chain", "makeChain")
 
     async def echo(self, text: str) -> str:
-        if self.echo_cap is None:
-            self.echo_cap = (await self.call(lambda: self.init.makeEcho(context=self.ctx))).result
-        return str((await self.call(lambda: self.echo_cap.echo(context=self.ctx, echo=text))).result)
+        capability = await self._capability("echo_cap", "makeEcho")
+        return str((await self.call(lambda: capability.echo(context=self.ctx, echo=text))).result)
 
     async def rpc(self, method: str, params: list | dict | None = None) -> Any:
         """Execute RPC-over-IPC. A failed call is never automatically replayed."""
@@ -163,11 +190,14 @@ class BitcoinIPCClient:
         return BlockData(block_hash, int(header["height"]), int(header["time"]), int(header["confirmations"]) > 0, raw)
 
     async def subscribe(self):
-        if self.handler is None:
-            chain = await self.chain_capability()
-            self.handler = (await self.call(lambda: chain.handleNotifications(
-                context=self.ctx, notifications=self.callback_servers[2],
-            ))).result
+        async with self._subscription_lock:
+            if not self.connected:
+                raise ConnectionLost("IPC is disconnected; reconnect and reconcile")
+            if self.handler is None:
+                chain = await self.chain_capability()
+                self.handler = (await self.call(lambda: chain.handleNotifications(
+                    context=self.ctx, notifications=self.callback_servers[2],
+                ))).result
 
     def emit(self, event: ChainEvent):
         if self._closing:

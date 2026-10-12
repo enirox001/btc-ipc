@@ -15,7 +15,6 @@ from bitcoin_ipc_client.schemas import DEFAULT_CORE, provenance, require_capnp
 from reference_indexer.blocks import decode_block
 from reference_indexer.store import IndexStore
 from reference_indexer.sync import reconcile
-from benchmarks import benchmark
 
 LOG = logging.getLogger("btc-ipc")
 
@@ -88,15 +87,7 @@ def parser():
         if command == "index":
             sub.add_argument("--db", default=".local/index.sqlite", help="Use :memory: for an ephemeral index")
             sub.add_argument("--once", action="store_true", help="Exit after converging to the current tip")
-    bench = commands.add_parser("benchmark", help="Compare typed block reads and RPC; storage excluded")
-    bench.add_argument("--hash")
-    bench.add_argument("--iterations", type=int, default=100)
-    bench.add_argument("--http-url", help="Optional HTTP RPC baseline")
-    bench.add_argument("--cookie", type=Path)
     commands.add_parser("provenance", help="Report Core revision and schema checksums")
-    commands.add_parser("selftest", help="Run offline decoding, persistence, and reconciliation tests")
-    integration = commands.add_parser("integration-test", help="Run against a disposable regtest node")
-    integration.add_argument("--node-binary", type=Path, default=DEFAULT_CORE / "build/bin/bitcoin-node")
     return result
 
 async def run_command(args):
@@ -131,10 +122,6 @@ async def run_command(args):
                 if args.raw:
                     output["raw"] = block.raw.hex()
                 print_json(output)
-            elif args.command == "benchmark":
-                if args.iterations <= 0:
-                    raise ValueError("iterations must be positive")
-                print_json(await benchmark(client, args))
     finally:
         await client.close()
 
@@ -143,19 +130,11 @@ def main():
     args = parser().parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     try:
-        if args.command == "selftest":
-            from tests.test_offline import selftest
-            return selftest()
         if args.command == "provenance":
             print_json(provenance(args.core_source))
             return 0
         capnp = require_capnp()
-        if args.command == "integration-test":
-            from tests.integration import integration_test
-            routine = integration_test(args)
-        else:
-            routine = run_command(args)
-        asyncio.run(capnp.run(routine))
+        asyncio.run(capnp.run(run_command(args)))
         return 0
     except KeyboardInterrupt:
         return 130
