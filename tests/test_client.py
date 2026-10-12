@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from bitcoin_ipc_client import BitcoinIPCClient, ChainEvent, BlockUnavailable, ConnectionLost, IPCError, UnsupportedInterface
 from bitcoin_ipc_client.notifications import make_callback_servers
+from bitcoin_ipc_client.sockets import default_data_dir
 from bitcoin_ipc_client.types import display_hash, wire_hash
 from reference_indexer.blocks import decode_block
 from tests.fixtures import synthetic_block
@@ -15,6 +18,47 @@ from tests.fixtures import synthetic_block
 LOG = logging.getLogger("btc-ipc")
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_core_socket_addresses(self):
+        with patch.dict("os.environ", {"HOME": "/home/example"}):
+            for platform, base in (("darwin", "/home/example/Library/Application Support/Bitcoin"),
+                                   ("linux", "/home/example/.bitcoin")):
+                with self.subTest(platform=platform), patch("bitcoin_ipc_client.sockets.sys.platform", platform):
+                    for chain, suffix in (("main", ""), ("test", "testnet3"), ("testnet4", "testnet4"),
+                                          ("signet", "signet"), ("regtest", "regtest")):
+                        expected = str((Path(base) / suffix / "node.sock").resolve())
+                        self.assertEqual(BitcoinIPCClient("unix", chain=chain).socket, expected)
+                        self.assertEqual(BitcoinIPCClient("unix:", chain=chain).socket, expected)
+        with patch("bitcoin_ipc_client.sockets.sys.platform", "win32"), \
+             patch.dict("os.environ", {"APPDATA": "/roaming", "LOCALAPPDATA": "/local"}):
+            with patch("bitcoin_ipc_client.sockets.Path.is_dir", return_value=True):
+                self.assertEqual(default_data_dir(), Path("/roaming/Bitcoin"))
+            with patch("bitcoin_ipc_client.sockets.Path.is_dir", return_value=False):
+                self.assertEqual(default_data_dir(), Path("/local/Bitcoin"))
+
+    def test_custom_socket_addresses(self):
+        base = Path.cwd() / "custom core data"
+        self.assertEqual(BitcoinIPCClient("unix", chain="regtest", datadir=base).socket,
+                         str(base / "regtest/node.sock"))
+        self.assertEqual(BitcoinIPCClient("unix:custom.sock", chain="signet", datadir=base).socket,
+                         str(base / "signet/custom.sock"))
+        absolute = str(Path.cwd() / "explicit.sock")
+        self.assertEqual(BitcoinIPCClient("unix:" + absolute, datadir=base).socket, absolute)
+        # Plain paths retain their existing working-directory interpretation.
+        self.assertEqual(BitcoinIPCClient(".local/node.sock", chain="regtest", datadir=base).socket,
+                         str((Path.cwd() / ".local/node.sock").resolve()))
+        with self.assertRaisesRegex(ValueError, "Unknown chain"):
+            BitcoinIPCClient("unix", chain="invalid")
+
+    def test_cli_network_selection(self):
+        from cli import parser
+        for options, chain in (([], "main"), (["--regtest"], "regtest"),
+                               (["--chain", "signet"], "signet")):
+            args = parser().parse_args(["--socket", "unix", *options, "--datadir", "custom core data", "rpc", "getblockchaininfo"])
+            self.assertEqual(args.chain, chain)
+            client = BitcoinIPCClient(args.socket, chain=args.chain, datadir=args.datadir)
+            suffix = "" if chain == "main" else chain
+            self.assertEqual(client.socket, str((Path.cwd() / "custom core data" / suffix / "node.sock").resolve()))
+
     def test_hash_roundtrip(self):
         value = "0123456789abcdef" * 4
         self.assertEqual(display_hash(wire_hash(value)), value)

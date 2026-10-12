@@ -16,6 +16,7 @@ import urllib.request
 
 from bitcoin_ipc_client import BitcoinIPCClient, IPCError, RPCError
 from bitcoin_ipc_client.schemas import DEFAULT_CORE, provenance, require_capnp
+from bitcoin_ipc_client.sockets import CHAIN_DIRS
 from reference_indexer.blocks import decode_block
 
 def http_rpc(url: str, cookie: Path, method: str, params: list) -> Any:
@@ -75,7 +76,11 @@ async def benchmark(client: BitcoinIPCClient, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--core-source", type=Path, default=DEFAULT_CORE)
-    parser.add_argument("--socket", type=Path, default=Path(".local/node.sock"))
+    parser.add_argument("--socket", default=".local/node.sock", help="Socket path, unix for Core's default, or unix:PATH")
+    network = parser.add_mutually_exclusive_group()
+    network.add_argument("--chain", choices=CHAIN_DIRS, default="main")
+    network.add_argument("--regtest", dest="chain", action="store_const", const="regtest")
+    parser.add_argument("--datadir", type=Path)
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--hash")
     parser.add_argument("--iterations", type=int, default=100)
@@ -85,7 +90,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     async def run():
-        async with BitcoinIPCClient(args.socket, args.core_source, timeout=args.timeout) as client:
+        async with BitcoinIPCClient(args.socket, args.core_source, timeout=args.timeout,
+                                    chain=args.chain, datadir=args.datadir) as client:
             print(json.dumps(await benchmark(client, args), sort_keys=True), flush=True)
 
     try:

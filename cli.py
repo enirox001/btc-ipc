@@ -12,6 +12,7 @@ import sqlite3
 
 from bitcoin_ipc_client import BitcoinIPCClient, ChainEvent, IPCError, ConnectionLost, UnsupportedInterface
 from bitcoin_ipc_client.schemas import DEFAULT_CORE, provenance, require_capnp
+from bitcoin_ipc_client.sockets import CHAIN_DIRS
 from reference_indexer.blocks import decode_block
 from reference_indexer.store import IndexStore
 from reference_indexer.sync import reconcile
@@ -66,7 +67,11 @@ async def follow(client: BitcoinIPCClient, args, store: IndexStore | None = None
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--core-source", type=Path, default=DEFAULT_CORE)
-    result.add_argument("--socket", type=Path, default=Path(".local/node.sock"))
+    result.add_argument("--socket", default=".local/node.sock", help="Socket path, unix for Core's default, or unix:PATH")
+    network = result.add_mutually_exclusive_group()
+    network.add_argument("--chain", choices=CHAIN_DIRS, default="main", help="Network for Core-style addresses (default: main)")
+    network.add_argument("--regtest", dest="chain", action="store_const", const="regtest", help="Shorthand for --chain regtest")
+    result.add_argument("--datadir", type=Path, help="Core's base data directory for Core-style addresses")
     result.add_argument("--timeout", type=float, default=30)
     result.add_argument("--verbose", action="store_true")
     commands = result.add_subparsers(dest="command", required=True)
@@ -92,7 +97,7 @@ def parser():
 
 async def run_command(args):
     client = BitcoinIPCClient(args.socket, args.core_source, timeout=args.timeout,
-                              queue_size=getattr(args, "queue_size", 256))
+                              queue_size=getattr(args, "queue_size", 256), chain=args.chain, datadir=args.datadir)
     try:
         if args.command in ("watch", "index"):
             if args.poll_interval <= 0:

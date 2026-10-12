@@ -12,6 +12,7 @@ from .experimental import ExperimentalChain
 from .notifications import make_callback_servers
 from .rpc import execute_rpc
 from .schemas import DEFAULT_CORE, load_schemas, require_capnp
+from .sockets import resolve_socket
 from .types import BlockData, BlockRef, ChainEvent
 
 LOG = logging.getLogger("btc-ipc")
@@ -22,10 +23,11 @@ class BitcoinIPCClient:
     One server request context, serialized calls, no implicit RPC retries.
     Reconnect is explicit. Application code reconciles state after reconnect.
     """
-    def __init__(self, socket: str | Path, core_source: Path = DEFAULT_CORE, *, timeout: float = 30, queue_size: int = 256):
+    def __init__(self, socket: str | Path, core_source: Path = DEFAULT_CORE, *, timeout: float = 30,
+                 queue_size: int = 256, chain: str = "main", datadir: str | Path | None = None):
         if timeout <= 0 or queue_size <= 0:
             raise ValueError("timeout and queue size must be positive")
-        self.socket = str(Path(socket).resolve())
+        self.socket = resolve_socket(socket, chain=chain, datadir=datadir)
         self.core_source = Path(core_source)
         self.timeout = timeout
         self.events: asyncio.Queue[ChainEvent] = asyncio.Queue(queue_size)

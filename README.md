@@ -54,30 +54,40 @@ Build the matching IPC-enabled Core checkout, then run this from this project's
 directory:
 
 ```sh
-mkdir -p .local/node
 ../bitcoin_ipc_chain/build/bin/bitcoin -m node \
   -regtest -server -listen=0 -nosettings \
-  -datadir="$PWD/.local/node" \
-  -ipcbind="unix:$PWD/.local/node.sock" \
-  -printtoconsole
+  -ipcbind=unix -printtoconsole
 ```
 
-Keep it running while using the client in another terminal. The default socket
-is `.local/node.sock`; use `--socket /absolute/path/to/node.sock` for a node started
-in another directory. Global options go before the command.
+Core creates its default data directory and listens at its network-specific
+`node.sock`. On macOS, regtest uses
+`~/Library/Application Support/Bitcoin/regtest/node.sock`; on Linux, it uses
+`~/.bitcoin/regtest/node.sock`.
+
+Keep it running while using the client in another terminal. `--socket unix`
+selects Core's default socket; `--regtest` selects its regtest directory. The
+default network is mainnet; use `--chain signet`, `--chain testnet4`, or `--chain
+test` for other networks. `--datadir /path/to/core-data` selects a custom base data
+directory, with the network suffix added automatically. The client does not read
+`bitcoin.conf`; pass any configured network/data directory explicitly.
+
+Plain `--socket /path/to/node.sock` paths keep their existing interpretation.
+Core-style `--socket unix:/path/to/node.sock` is also supported; a relative
+`unix:PATH` resolves inside Core's network data directory. Without `--socket`,
+the client still uses `.local/node.sock`. Global options go before the command.
 
 ## Commands
 
 ```sh
-python btc_ipc.py echo
-python btc_ipc.py rpc getblockchaininfo
-python btc_ipc.py rpc generatetoaddress \
+python btc_ipc.py --socket unix --regtest echo
+python btc_ipc.py --socket unix --regtest rpc getblockchaininfo
+python btc_ipc.py --socket unix --regtest rpc generatetoaddress \
   --params '[5,"mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"]'
-python btc_ipc.py block BLOCK_HASH --mode typed
-python btc_ipc.py block BLOCK_HASH --mode rpc
-python btc_ipc.py watch
-python btc_ipc.py index --once
-python btc_ipc.py index
+python btc_ipc.py --socket unix --regtest block BLOCK_HASH --mode typed
+python btc_ipc.py --socket unix --regtest block BLOCK_HASH --mode rpc
+python btc_ipc.py --socket unix --regtest watch
+python btc_ipc.py --socket unix --regtest index --once
+python btc_ipc.py --socket unix --regtest index
 ```
 
 Commands emit JSON. RPC parameters accept a JSON array or object. Mutating RPC
@@ -103,7 +113,7 @@ import capnp
 from bitcoin_ipc_client import BitcoinIPCClient
 
 async def main():
-    async with BitcoinIPCClient(".local/node.sock") as client:
+    async with BitcoinIPCClient("unix", chain="regtest") as client:
         tip = await client.tip()
         block = await client.block(tip.hash)
         print(block.height, len(block.raw))
@@ -123,7 +133,7 @@ this automatically.
 ```sh
 python -m unittest discover -s tests -v
 python -m tests.integration
-python benchmarks.py --iterations 100
+python benchmarks.py --socket unix --regtest --iterations 100
 ```
 
 Native binding tests require pycapnp and the matching Core schemas; otherwise
